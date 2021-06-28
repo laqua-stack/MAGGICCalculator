@@ -76,12 +76,12 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
     """
     def __init__(self, year=1):
 
-        if year != 1 or year != 3:
-            raise AssertionError("Risk can only be calculated for 1 or 3 years")
+        if not (year == 1 or year == 3):
+            raise AssertionError("Risk can only be calculated for 1 or 3 years. You gave year = %s." % year)
         # init X and year
         self.year = year
         self.X = None
-        self._event_times = [1, 3]
+        self._event_times = np.array([1, 3])
         super().__init__()
         self.colnames = ['Age',
                          'Sex',
@@ -129,7 +129,7 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
         intscore = self._calculateRisk()
         y_pred_1year, y_pred_3year = self._lookup_risk_probability(intscore)
         survival_fcn['x'] = np.repeat(self._event_times[np.newaxis, :], X.shape[0], axis=0)
-        survival_fcn['y'] = np.stack(1 - y_pred_1year, 1 - y_pred_3year, axis=-1)
+        survival_fcn['y'] = np.stack([1 - y_pred_1year, 1 - y_pred_3year], axis=-1)
         return survival_fcn
 
     def _check_X(self):
@@ -137,7 +137,7 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
         if isinstance(X, pd.DataFrame):
             try:
                 for col in self.colnames:
-                    assert col in X.loc(axis=1).columns.tolist()
+                    assert col in X.columns.tolist()
             except AssertionError as e:
                 raise AssertionError('Not all necessary columns are in the DataFrame' + str(e))
             return X
@@ -178,7 +178,7 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
         # check age
         _age = X['Age'].to_numpy()
         if np.isnan(_age).any() or np.less(_age, 18.0).any() or np.greater(_age, 110.0).any():
-            raise ValueError('Height must be between 18 and 110 years.')
+            raise ValueError('Age must be between 18 and 110 years.')
 
         # check sex
         _sex = X['Sex'].to_numpy()
@@ -251,7 +251,7 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
 
         # check for systolic blood pressure
         _sysbp = X['SysBP'].to_numpy()
-        if np.isnan(_sysbp).any() or np.less(_sysbp, 10.).any() or np.greater(_sysbp, 50.).any():
+        if np.isnan(_sysbp).any() or np.less(_sysbp, 50.).any() or np.greater(_sysbp, 250.).any():
             raise ValueError('SysBP must be between 50 and 250 mmHg.')
 
         # check for creatinine
@@ -278,14 +278,21 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
 
     def _bmicalc_m(self):
         X = self._check_X()
-        _m = X['height'].to_numpy()
-        _kg = X['weight'].to_numpy()
+        _m = X['Height'].to_numpy()
+        _kg = X['Weight'].to_numpy()
         if np.isnan(_m).any() or np.less(_m, 0.5).any() or np.greater(_m, 3.0).any():
             raise ValueError('Height must be between 0.5 and 3.0 meters.')
         if np.isnan(_kg).any() or np.less(_kg, 10.).any() or np.greater(_kg, 300.).any():
             raise ValueError('Height must be between 10 and 300 kg.')
 
-        return _kg / (_m * _m)
+        _bmi = _kg / (_m * _m)
+
+        # winsorize BMI to 10 - 50
+        _bmi[np.greater(_bmi, 50)] = 50
+        _bmi[np.less(_bmi, 10)] = 10
+
+
+        return _bmi
 
     def _calculateRisk(self):
         """
@@ -303,7 +310,7 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
                     'Currsmoking',
                     'BB',
                     'ACEiARB']:
-            X['_risk'] += X['_risk' + col]
+            X['_risk'] += X['_risk_' + col]
 
         # lookup integer scores for relative risk score
         # EF + Age
@@ -365,7 +372,7 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
         # select age axis
         efar_age_risk_ints = np.take(efar_risk_ints, _age_mask.argmax(axis=0), axis=0)
         # select EF axis
-        _efar_risk = np.take_along_axis(efar_age_risk_ints, _efage_mask.argmax(axis=0)[:, np.newaxis], axis=1)
+        _efar_risk = np.take_along_axis(efar_age_risk_ints, _efage_mask.argmax(axis=0)[:, np.newaxis], axis=1).squeeze()
         self.X['_efar_risk'] = _efar_risk
 
         return _ef_risk + _efar_risk
@@ -399,7 +406,7 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
         # select sbp axis
         efsbp_sbp_risk_ints = np.take(efsbp_risk_ints, _sbp_mask.argmax(axis=0), axis=0)
         # select EF axis
-        _sbp_risk = np.take_along_axis(efsbp_sbp_risk_ints, _sbp_mask.argmax(axis=0)[:, np.newaxis], axis=1)
+        _sbp_risk = np.take_along_axis(efsbp_sbp_risk_ints, _efsbp_mask.argmax(axis=0)[:, np.newaxis], axis=1).squeeze()
         self.X['_sbp_risk'] = _sbp_risk
         return _sbp_risk
 
@@ -444,3 +451,35 @@ class MAGGICCalculator(BaseEstimator):  # , SurvivalAnalysisMixin):
         _nyha_risk = np.take(nyha_risk_ints, _nyha_mask.argmax(axis=0))
         self.X['_risk_NYHA'] = _nyha_risk
         return _nyha_risk
+
+
+if __name__ == '__main__':
+    # from MAGGICCalculator import MAGGICCalculator
+    import pandas as pd
+    from pathlib import Path
+    from matplotlib import pyplot as plt
+    from src.util.missingpy import MissForest
+    X = pd.read_csv('../data/MAGGIC_data.csv', delimiter=',', na_values=[99983.])
+    with Path('../data/MAGGIC_data_imputed.pickle') as p:
+        if p.exists():
+            X = pd.read_pickle(p)
+        else:
+            mf = MissForest()
+            X_imputed = mf.fit_transform(X)
+            X = pd.DataFrame(X_imputed, columns=X.columns, index=X.index)
+            pd.to_pickle(X, '../data/MAGGIC_data_imputed.pickle')
+
+
+
+    # imply that .predict should return 3 year probability of death
+    mc = MAGGICCalculator(year=3)
+    prob_3_year = mc.predict(X)
+    print(prob_3_year)
+
+    # plot 1 and 3 year survival
+    y_surv_fnc = mc.predict_survival_function(X)
+
+    fig, ax = plt.subplots()
+    ax.plot(y_surv_fnc['x'], y_surv_fnc['y'], 'bo')
+    plt.show()
+    plt.close()
